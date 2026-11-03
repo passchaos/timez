@@ -19,16 +19,15 @@ integration suite includes:
 
 ## Fuzzing
 
-Both wire parsers have `std.testing.fuzz` entry points:
+Both wire parsers have `std.testing.fuzz` entry points, which run as normal
+tests in `zig build test`. The NTP fuzz test round-trips any successfully
+parsed packet; the PTP fuzz test does the same for headers and bodies.
+Parsers reject excessive lengths, invalid versions, malformed extension
+fields, and truncated bodies.
 
-```sh
-zig test src/ntp/packet.zig --fuzz
-zig test src/ptp/message.zig --fuzz
-```
-
-The NTP fuzz test round-trips any successfully parsed packet; the PTP fuzz
-test does the same for headers and bodies. Parsers reject excessive lengths,
-invalid versions, malformed extension fields, and truncated bodies.
+Zig 0.16.0's `-ffuzz` test runner currently fails in its own
+`test_runner.zig` (`builtin.StackTrace` versus `debug.StackTrace`), so
+continuous fuzzing is pending that upstream fix.
 
 ## Coverage highlights
 

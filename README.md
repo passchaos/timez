@@ -49,13 +49,12 @@ zig build docs              # generated API docs
 The NTS TLS integration test runs a local vail TLS 1.3 server with an
 Ed25519 raw public key and completes a real NTS-KE exchange.
 
-Fuzz tests for the NTP and PTP wire parsers are part of the unit test suite
-and can be run continuously with Zig's built-in fuzzer:
-
-```sh
-zig test src/ntp/packet.zig --fuzz
-zig test src/ptp/message.zig --fuzz
-```
+The NTP and PTP wire parsers include `std.testing.fuzz` entry points and are
+bounded for arbitrary input. They run as ordinary tests in `zig build test`.
+Zig 0.16.0's `-ffuzz` test runner currently fails in its own
+`test_runner.zig` with a `builtin.StackTrace`/`debug.StackTrace` type
+mismatch, so continuous fuzzing will become available once that upstream
+issue is fixed.
 
 ## Quick examples
 

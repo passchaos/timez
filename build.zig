@@ -64,22 +64,4 @@ pub fn build(b: *std.Build) void {
     integration_step.dependOn(&run_integration_tests.step);
 
     test_step.dependOn(&run_integration_tests.step);
-
-    const fuzz_step = b.step("fuzz", "Run a fuzz target (requires -Dfuzz-target)");
-    const fuzz_target = b.option([]const u8, "fuzz-target", "Fuzz target: ntp-packet, ptp-message");
-    if (fuzz_target) |name| {
-        const path = b.path(b.fmt("test/fuzz/{s}.zig", .{name}));
-        const fuzz_module = b.createModule(.{
-            .root_source_file = path,
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .fuzz = true,
-        });
-        fuzz_module.addImport("timez", timez);
-        const fuzz_tests = b.addTest(.{ .root_module = fuzz_module });
-        const run_fuzz = b.addRunArtifact(fuzz_tests);
-        run_fuzz.has_side_effects = true;
-        fuzz_step.dependOn(&run_fuzz.step);
-    }
 }

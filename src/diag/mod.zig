@@ -160,6 +160,8 @@ pub const Metrics = struct {
     uncertainty: Duration = .zero,
     drift_ppm: f64 = 0.0,
     holdover: Duration = .zero,
+    /// Estimated or measured PTP hardware timestamp error.
+    hardware_timestamp_error: Duration = .zero,
     synchronized: bool = false,
     quality: Quality = .{},
     steps: u64 = 0,
@@ -170,7 +172,7 @@ pub const Metrics = struct {
 
     pub fn format(self: Metrics, w: *std.Io.Writer) std.Io.Writer.Error!void {
         try w.print(
-            "offset={d}ns delay={d}ns jitter={d}ns uncertainty={d}ns drift={d:.3}ppm holdover={d}ms synchronized={} stratum={d} steps={d} slews={d} requests={d} responses={d} failures={d}",
+            "offset={d}ns delay={d}ns jitter={d}ns uncertainty={d}ns drift={d:.3}ppm holdover={d}ms hw_ts_error={d}ns synchronized={} stratum={d} steps={d} slews={d} requests={d} responses={d} failures={d}",
             .{
                 self.offset.ns,
                 self.delay.ns,
@@ -178,6 +180,7 @@ pub const Metrics = struct {
                 self.uncertainty.ns,
                 self.drift_ppm,
                 self.holdover.toMilliseconds(),
+                self.hardware_timestamp_error.ns,
                 self.synchronized,
                 self.quality.stratum,
                 self.steps,
@@ -219,6 +222,10 @@ pub const Collector = struct {
         self.metrics.drift_ppm = clock_snapshot.frequency * 1e6;
         self.metrics.synchronized = clock_snapshot.synchronized;
         self.metrics.quality = clock_snapshot.quality;
+    }
+
+    pub fn recordHardwareTimestampError(self: *Collector, timestamp_error: Duration) void {
+        self.metrics.hardware_timestamp_error = timestamp_error;
     }
 
     pub fn recordStep(self: *Collector) void {
@@ -274,6 +281,7 @@ test "collector counters and formatting" {
     collector.recordSuccess(Duration.fromMilliseconds(3), Duration.fromMilliseconds(5), .zero);
     collector.recordFailure();
     collector.recordStep();
+    collector.recordHardwareTimestampError(Duration.fromNanoseconds(25));
 
     const metrics = collector.snapshot();
     try std.testing.expectEqual(@as(u64, 1), metrics.sync_requests);
@@ -281,6 +289,7 @@ test "collector counters and formatting" {
     try std.testing.expectEqual(@as(u64, 1), metrics.sync_failures);
     try std.testing.expectEqual(@as(u64, 1), metrics.steps);
     try std.testing.expectEqual(Duration.fromMilliseconds(3), metrics.offset);
+    try std.testing.expectEqual(Duration.fromNanoseconds(25), metrics.hardware_timestamp_error);
 
     var buffer: [256]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);

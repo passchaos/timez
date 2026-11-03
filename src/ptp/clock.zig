@@ -366,7 +366,7 @@ pub const OrdinaryClock = struct {
         body: []const u8,
         output: []u8,
     ) Error!usize {
-        var header = Header{
+        const header = Header{
             .message_type = message_type,
             .version = .v2,
             .domain = self.config.domain,
@@ -375,11 +375,8 @@ pub const OrdinaryClock = struct {
             .sequence_id = sequence_id,
             .control_field = self.config.control_field orelse message_type.controlField(),
             .log_message_interval = self.config.log_message_interval,
-            .flags = .{ .two_step = self.config.two_step },
+            .flags = .{ .two_step = self.config.two_step and message_type == .sync },
         };
-        if (message_type == .follow_up or message_type == .delay_resp) {
-            header.flags.two_step = false;
-        }
         return message.write(header, body, output);
     }
 

@@ -19,6 +19,12 @@ Implemented and tested:
 | `timez.profiles` | IEEE 1588 default, 802.1AS/gPTP, AES67/ST 2059-2, G.8275.1, C37.238 |
 | `timez.diag` | Offset/drift/jitter statistics, holdover prediction, and metrics/counters |
 
+Security notes:
+
+- Prefer NTS for NTP. NTPv4 autokey is intentionally absent.
+- PTP is unauthenticated by design; do not treat it as a security boundary.
+- All wire parsers validate lengths and reject malformed input before use.
+
 Deliberately not implemented:
 
 - NTPv4 autokey (obsolete and unsafe).

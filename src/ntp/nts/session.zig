@@ -61,7 +61,7 @@ pub const ClientSession = struct {
     /// the authenticated Unique Identifier, Cookie, Cookie Placeholder(s), and
     /// Authenticator extension fields.
     pub fn protectRequest(self: *ClientSession, request: *const packet.Packet, output: []u8) Error!usize {
-        const cookie_value = self.cookies.take() orelse return error.NoCookie;
+        const cookie_value = self.cookies.peek() orelse return error.NoCookie;
 
         var unique_id: [aead.unique_id_len]u8 = undefined;
         self.io.random(&unique_id);
@@ -93,6 +93,7 @@ pub const ClientSession = struct {
             associated_data,
             &nonce,
         );
+        _ = self.cookies.take();
         return offset;
     }
 

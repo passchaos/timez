@@ -408,7 +408,7 @@ pub fn negotiateServer(channel: Channel, config: ServerConfig) anyerror!ServerNe
         offset = try records.writeRecord(&response, offset, false, records.record_ntp_port, &body);
     }
 
-    const cookie_count = @max(config.cookies_per_response, 1);
+    const cookie_count = std.math.clamp(config.cookies_per_response, 1, 8);
     var cookie_buffer: [cookie.max_cookie_len]u8 = undefined;
     var i: usize = 0;
     while (i < cookie_count) : (i += 1) {

@@ -119,19 +119,6 @@ pub fn writeRecord(
     return offset + 4 + body.len;
 }
 
-pub fn writeU16List(buffer: []u8, offset: usize, values: []const u16) error{ BufferTooSmall, BodyTooLong }!usize {
-    const body_len = values.len * 2;
-    if (buffer.len < offset + 4 + body_len) return error.BufferTooSmall;
-    buffer[offset + 2] = @truncate(body_len);
-    buffer[offset + 3] = @truncate(body_len >> 8);
-    var out = offset + 4;
-    for (values) |value| {
-        putU16(buffer, out, value);
-        out += 2;
-    }
-    return out;
-}
-
 fn readU16(bytes: []const u8, offset: usize) u16 {
     return (@as(u16, bytes[offset]) << 8) | bytes[offset + 1];
 }

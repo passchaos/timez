@@ -282,3 +282,60 @@ test "NTS server returns a NAK for an invalid cookie" {
     );
     try std.testing.expectEqual([_]u8{ 'N', 'T', 'S', 'N' }, client.last_kiss_code.?);
 }
+
+test "linux SO_TIMESTAMPING delivers a receive timestamp" {
+    if (@import("builtin").os.tag != .linux) return;
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const placeholder = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var client_transport = try ntp.UdpTransport.init(io, placeholder, placeholder);
+    defer client_transport.deinit();
+    var server_transport = try ntp.UdpTransport.init(io, placeholder, placeholder);
+    defer server_transport.deinit();
+
+    client_transport.peer = server_transport.socket.address;
+    server_transport.peer = client_transport.socket.address;
+
+    timez.hal.linux.timestamping.enable(
+        server_transport.socket.handle,
+        timez.hal.linux.timestamping.Flags.receive_all,
+    ) catch |err| switch (err) {
+        error.AccessDenied, error.SocketUnsupported => return,
+        else => return err,
+    };
+
+    try client_transport.sendBytes("ntp");
+    // Let the kernel process the packet and attach its software timestamp
+    // before the receive call drains the queue.
+    try io.sleep(.fromMilliseconds(10), .awake);
+
+    var control_buffer: [256]u8 = undefined;
+    var data_buffer: [64]u8 = undefined;
+    var messages = [_]std.Io.net.IncomingMessage{std.Io.net.IncomingMessage.init};
+    messages[0].control = control_buffer[0..];
+
+    const io_timeout: std.Io.Timeout = .{
+        .duration = .{
+            .raw = std.Io.Duration.fromNanoseconds(clock.Duration.fromSeconds(1).ns),
+            .clock = .awake,
+        },
+    };
+    const maybe_error, const count = server_transport.socket.receiveManyTimeout(
+        io,
+        &messages,
+        &data_buffer,
+        .{},
+        io_timeout,
+    );
+    if (maybe_error) |err| return err;
+    try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expectEqualStrings("ntp", messages[0].data);
+
+    const timestamps = try timez.hal.linux.timestamping.parseControl(messages[0].control);
+    try std.testing.expect(timestamps.software != null);
+    const software = timestamps.softwareTimestamp().?;
+    try std.testing.expect(software.ns > 0);
+}

@@ -14,6 +14,7 @@ pub const Timestamp = types.Timestamp;
 pub const TaiTimestamp = types.TaiTimestamp;
 pub const OffsetSample = types.OffsetSample;
 
+pub const Error = source.Error;
 pub const Snapshot = source.Snapshot;
 pub const TimeSource = source.TimeSource;
 pub const Monotonic = source.Monotonic;

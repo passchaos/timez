@@ -4,11 +4,18 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const vail_dependency = b.dependency("vail", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const vail = vail_dependency.module("vail");
+
     const timez = b.addModule("timez", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
+        .imports = &.{.{ .name = "vail", .module = vail }},
     });
 
     const lib = b.addLibrary(.{
@@ -45,6 +52,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     integration_module.addImport("timez", timez);
+    integration_module.addImport("vail", vail);
     const integration_tests = b.addTest(.{
         .root_module = integration_module,
         .filters = if (test_filter) |f| &.{f} else &.{},
@@ -57,7 +65,7 @@ pub fn build(b: *std.Build) void {
 
     test_step.dependOn(&run_integration_tests.step);
 
-    const fuzz_step = b.step("fuzz", "Build fuzz targets (requires -Dfuzz-target)");
+    const fuzz_step = b.step("fuzz", "Run a fuzz target (requires -Dfuzz-target)");
     const fuzz_target = b.option([]const u8, "fuzz-target", "Fuzz target: ntp-packet, ptp-message");
     if (fuzz_target) |name| {
         const path = b.path(b.fmt("test/fuzz/{s}.zig", .{name}));
@@ -66,13 +74,12 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
+            .fuzz = true,
         });
         fuzz_module.addImport("timez", timez);
-        const fuzz_exe = b.addExecutable(.{
-            .name = b.fmt("fuzz-{s}", .{name}),
-            .root_module = fuzz_module,
-        });
-        const install_fuzz = b.addInstallArtifact(fuzz_exe, .{});
-        fuzz_step.dependOn(&install_fuzz.step);
+        const fuzz_tests = b.addTest(.{ .root_module = fuzz_module });
+        const run_fuzz = b.addRunArtifact(fuzz_tests);
+        run_fuzz.has_side_effects = true;
+        fuzz_step.dependOn(&run_fuzz.step);
     }
 }

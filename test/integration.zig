@@ -405,3 +405,206 @@ test "PTP master announce, sync, and follow-up drive the discipline" {
     const result = disciplined.update(estimate.sample(local_clock.mono));
     try std.testing.expect(result.stepped);
 }
+
+const vail = @import("vail");
+
+fn readAvailableIntegration(reader: *std.Io.Reader, buffer: []u8) !usize {
+    var data = [1][]u8{buffer};
+    return reader.readVec(&data) catch |err| switch (err) {
+        error.EndOfStream => 0,
+        else => return err,
+    };
+}
+
+fn ed25519Spki(public_key: [32]u8) [44]u8 {
+    return .{
+        0x30, 0x2a, // SEQUENCE, length 42
+        0x30, 0x05, // SEQUENCE, length 5
+        0x06, 0x03, 0x2b, 0x65, 0x70, // OID 1.3.101.112 (Ed25519)
+        0x03, 0x21, 0x00, // BIT STRING, length 33, no unused bits
+    } ++ public_key;
+}
+
+fn writeServerFlight(writer: *std.Io.Writer, flight: []const u8) !void {
+    // vail emits a bare ServerHello handshake message followed by TLS records
+    // for the encrypted part of the flight. Frame the ServerHello first.
+    const hello_len = 4 + ((@as(usize, flight[1]) << 16) |
+        (@as(usize, flight[2]) << 8) |
+        flight[3]);
+    var header: [5]u8 = .{ 22, 3, 3, 0, 0 };
+    std.mem.writeInt(u16, header[3..5], @intCast(hello_len), .big);
+    try writer.writeAll(&header);
+    try writer.writeAll(flight[0..hello_len]);
+    try writer.writeAll(flight[hello_len..]);
+    try writer.flush();
+}
+
+const NtsKeTestServer = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    listener: *std.Io.net.Server,
+    key_pair: std.crypto.sign.Ed25519.KeyPair,
+    spki: [44]u8,
+    result: anyerror!void = {},
+
+    fn run(ctx: *NtsKeTestServer) void {
+        ctx.result = ctx.runInner();
+    }
+
+    fn threadMain(ctx: *NtsKeTestServer) void {
+        var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+        defer threaded.deinit();
+        ctx.io = threaded.io();
+        ctx.run();
+    }
+
+    fn runInner(ctx: *NtsKeTestServer) !void {
+        const ServerConn = vail.tls.server_connection.ServerConnection(4096, 4096);
+
+        const peer = try ctx.listener.accept(ctx.io);
+        defer peer.close(ctx.io);
+
+        var read_buffer: [4096]u8 = undefined;
+        var reader = peer.reader(ctx.io, &read_buffer);
+        var write_buffer: [4096]u8 = undefined;
+        var writer = peer.writer(ctx.io, &write_buffer);
+
+        var server_random: [32]u8 = undefined;
+        ctx.io.random(&server_random);
+        var server_secret: [32]u8 = undefined;
+        ctx.io.random(&server_secret);
+        var key_material = vail.tls.key_exchange.ServerKeyMaterial{ .x25519 = server_secret };
+        const chain = [1][]const u8{&ctx.spki};
+
+        var tls = ServerConn.init(.{
+            .allocator = ctx.allocator,
+            .policy = .{
+                .alpn_protocols = &.{"ntske/1"},
+                .server_certificate_type = .raw_public_key,
+            },
+            .server_random = server_random,
+            .key_material = &key_material,
+            .certificate_chain = &chain,
+            .signer = .{ .ed25519 = .{ .key_pair = ctx.key_pair } },
+            .server_certificate_type = .raw_public_key,
+        });
+        defer tls.deinit();
+
+        var tls_output: std.ArrayList(u8) = .empty;
+        defer tls_output.deinit(ctx.allocator);
+        var established: ServerConn.Established = undefined;
+        var established_ready = false;
+
+        var input: [4096]u8 = undefined;
+        while (!established_ready) {
+            const n = try readAvailableIntegration(&reader.interface, &input);
+            if (n == 0) return error.ConnectionClosed;
+            var remaining = input[0..n];
+            while (remaining.len > 0) {
+                tls_output.clearRetainingCapacity();
+                const received = try tls.receiveInto(remaining, &tls_output, &established);
+                remaining = remaining[received.consumed..];
+                if (tls_output.items.len > 0) {
+                    if (received.event) |event| {
+                        switch (event) {
+                            .server_flight => try writeServerFlight(&writer.interface, tls_output.items),
+                            else => {
+                                try writer.interface.writeAll(tls_output.items);
+                                try writer.interface.flush();
+                            },
+                        }
+                    } else {
+                        try writer.interface.writeAll(tls_output.items);
+                        try writer.interface.flush();
+                    }
+                }
+                if (received.event) |event| switch (event) {
+                    .established => {
+                        established_ready = true;
+                        break;
+                    },
+                    .peer_alert => return error.TlsAlert,
+                    else => {},
+                };
+                if (received.consumed == 0 and received.event == null) break;
+            }
+        }
+
+        var response: [256]u8 = undefined;
+        var offset: usize = 0;
+        offset = try ntp.nts.records.writeRecord(&response, offset, true, ntp.nts.records.record_next_protocol, &.{ 0, 0 });
+        offset = try ntp.nts.records.writeRecord(&response, offset, false, ntp.nts.records.record_aead, &.{ 0, 15 });
+        offset = try ntp.nts.records.writeRecord(&response, offset, false, ntp.nts.records.record_new_cookie, &([_]u8{0x77} ** 16));
+        offset = try ntp.nts.records.writeRecord(&response, offset, true, ntp.nts.records.record_end, &.{});
+
+        var application_input: [4096]u8 = undefined;
+        while (true) {
+            const n = try readAvailableIntegration(&reader.interface, &application_input);
+            if (n == 0) return error.ConnectionClosed;
+            var app_offset: usize = 0;
+            while (app_offset < n) {
+                const received = try established.application.receive(application_input[app_offset..n]);
+                app_offset += received.consumed;
+                if (received.event) |event| switch (event) {
+                    .application_data => {
+                        var record: [4096]u8 = undefined;
+                        const len = try established.application.sealApplicationData(response[0..offset], &record);
+                        try writer.interface.writeAll(record[0..len]);
+                        try writer.interface.flush();
+
+                        var alert: [64]u8 = undefined;
+                        const alert_len = established.application.sealCloseNotify(&alert) catch 0;
+                        if (alert_len > 0) {
+                            try writer.interface.writeAll(alert[0..alert_len]);
+                            try writer.interface.flush();
+                        }
+                        return;
+                    },
+                    .alert => return error.TlsAlert,
+                    else => {},
+                };
+                if (received.consumed == 0 and received.event == null) break;
+            }
+        }
+    }
+};
+
+test "NTS-KE completes over a vail TLS 1.3 channel" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const key_pair = std.crypto.sign.Ed25519.KeyPair.generate(io);
+    const spki = ed25519Spki(key_pair.public_key.toBytes());
+
+    const listen_address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var listener = try std.Io.net.IpAddress.listen(&listen_address, io, .{ .mode = .stream });
+    defer listener.deinit(io);
+
+    var server_context = NtsKeTestServer{
+        .io = undefined,
+        .allocator = std.heap.page_allocator,
+        .listener = &listener,
+        .key_pair = key_pair,
+        .spki = spki,
+    };
+    const server_thread = try std.Thread.spawn(.{}, NtsKeTestServer.threadMain, .{&server_context});
+
+    const channel = try ntp.nts.vail.VailChannel.init(.{
+        .allocator = std.testing.allocator,
+        .io = io,
+        .address = listener.socket.address,
+        .server_name = "ntske-test",
+        .verifier = .{ .pinned_raw_public_key = &spki },
+        .server_certificate_type = .raw_public_key,
+    });
+    defer channel.deinit();
+
+    var negotiation = try ntp.nts.ke.negotiate(channel.channel(), .{});
+    defer negotiation.deinit();
+    try std.testing.expectEqual(@as(usize, 1), negotiation.cookies.len());
+    try std.testing.expectEqual(@as(u16, 15), negotiation.aead_id);
+
+    server_thread.join();
+    try server_context.result;
+}

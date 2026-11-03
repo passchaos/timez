@@ -17,6 +17,7 @@ pub const ke = @import("nts/ke.zig");
 pub const aead = @import("nts/aead.zig");
 pub const cookie = @import("nts/cookie.zig");
 pub const session = @import("nts/session.zig");
+pub const vail = @import("nts/vail.zig");
 
 pub const Channel = ke.Channel;
 pub const Negotiation = ke.Negotiation;
@@ -27,6 +28,7 @@ pub const CookieKeyRing = cookie.KeyRing;
 pub const ClientSession = session.ClientSession;
 pub const ServerSession = session.ServerSession;
 pub const VerifiedRequest = session.VerifiedRequest;
+pub const VailChannel = vail.VailChannel;
 pub const ext_unique_id = aead.ext_unique_id;
 pub const ext_cookie = aead.ext_cookie;
 pub const ext_cookie_placeholder = aead.ext_cookie_placeholder;
@@ -40,4 +42,5 @@ test {
     _ = aead;
     _ = cookie;
     _ = session;
+    _ = vail;
 }

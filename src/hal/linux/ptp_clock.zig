@@ -99,10 +99,16 @@ pub const OffsetResult = struct {
     /// Half the spread between the minimum and maximum sample.
     uncertainty: clock.Duration,
 
-    pub fn sample(self: OffsetResult, monotonic: clock.Duration) clock.Sample {
+    /// Build a discipline sample from the system UTC reading captured at the
+    /// same time as the PTP clock sample.
+    pub fn sample(
+        self: OffsetResult,
+        system_utc: clock.Timestamp,
+        monotonic: clock.Duration,
+    ) clock.Sample {
         return .{
             .monotonic = monotonic,
-            .reference = clock.Timestamp.fromNanoseconds(monotonic.ns + self.offset.ns),
+            .reference = system_utc.add(self.offset),
             .uncertainty = self.uncertainty,
         };
     }

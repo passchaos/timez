@@ -307,35 +307,101 @@ test "linux SO_TIMESTAMPING delivers a receive timestamp" {
         else => return err,
     };
 
-    try client_transport.sendBytes("ntp");
-    // Let the kernel process the packet and attach its software timestamp
-    // before the receive call drains the queue.
-    try io.sleep(.fromMilliseconds(10), .awake);
+    var timestamps: timez.hal.linux.timestamping.TimestampingResult = .{};
+    var attempt: usize = 0;
+    while (attempt < 10) : (attempt += 1) {
+        try client_transport.sendBytes("ntp");
+        // Software receive timestamps are attached asynchronously; give the
+        // kernel a moment and retry if the queue was drained too early.
+        try io.sleep(.fromMilliseconds(20), .awake);
 
-    var control_buffer: [256]u8 = undefined;
-    var data_buffer: [64]u8 = undefined;
-    var messages = [_]std.Io.net.IncomingMessage{std.Io.net.IncomingMessage.init};
-    messages[0].control = control_buffer[0..];
+        var control_buffer: [256]u8 = undefined;
+        var data_buffer: [64]u8 = undefined;
+        var messages = [_]std.Io.net.IncomingMessage{std.Io.net.IncomingMessage.init};
+        messages[0].control = control_buffer[0..];
 
-    const io_timeout: std.Io.Timeout = .{
-        .duration = .{
-            .raw = std.Io.Duration.fromNanoseconds(clock.Duration.fromSeconds(1).ns),
-            .clock = .awake,
-        },
-    };
-    const maybe_error, const count = server_transport.socket.receiveManyTimeout(
-        io,
-        &messages,
-        &data_buffer,
-        .{},
-        io_timeout,
-    );
-    if (maybe_error) |err| return err;
-    try std.testing.expectEqual(@as(usize, 1), count);
-    try std.testing.expectEqualStrings("ntp", messages[0].data);
+        const io_timeout: std.Io.Timeout = .{
+            .duration = .{
+                .raw = std.Io.Duration.fromNanoseconds(clock.Duration.fromSeconds(1).ns),
+                .clock = .awake,
+            },
+        };
+        const maybe_error, const count = server_transport.socket.receiveManyTimeout(
+            io,
+            &messages,
+            &data_buffer,
+            .{},
+            io_timeout,
+        );
+        if (maybe_error) |err| return err;
+        try std.testing.expectEqual(@as(usize, 1), count);
+        try std.testing.expectEqualStrings("ntp", messages[0].data);
 
-    const timestamps = try timez.hal.linux.timestamping.parseControl(messages[0].control);
+        timestamps = try timez.hal.linux.timestamping.parseControl(messages[0].control);
+        if (timestamps.software != null) break;
+    }
     try std.testing.expect(timestamps.software != null);
     const software = timestamps.softwareTimestamp().?;
     try std.testing.expect(software.ns > 0);
+}
+
+test "PTP master announce, sync, and follow-up drive the discipline" {
+    const ptp = timez.ptp;
+    const master_config: ptp.clock.Config = .{
+        .identity = ptp.types.ClockIdentity.fromU64(0x0011223344556677),
+        .domain = 0,
+        .two_step = true,
+        .priority1 = 10,
+        .quality = .{ .clock_class = 6, .clock_accuracy = .within_100ns },
+        .time_source = .gps,
+    };
+    const slave_config: ptp.clock.Config = .{
+        .identity = ptp.types.ClockIdentity.fromU64(0x0102030405060708),
+        .domain = 0,
+        .priority1 = 128,
+        .quality = .{ .clock_class = 248, .clock_accuracy = .unknown },
+    };
+
+    var master = ptp.clock.OrdinaryClock.init(master_config);
+    var slave = ptp.clock.OrdinaryClock.init(slave_config);
+
+    const origin: ptp.types.Timestamp = .{ .seconds = 1_700_000_000, .nanoseconds = 0 };
+    const received: ptp.types.Timestamp = .{ .seconds = 1_700_000_001, .nanoseconds = 0 };
+
+    var announce_buffer: [64]u8 = undefined;
+    const announce_len = try master.makeAnnounce(1, origin, 0, &announce_buffer);
+    _ = try slave.handleMessage(announce_buffer[0..announce_len], received);
+    try std.testing.expectEqual(ptp.clock.Role.slave, slave.role);
+
+    var sync_buffer: [64]u8 = undefined;
+    const sync_len = try master.makeSync(2, .zero, .{}, &sync_buffer);
+    var follow_buffer: [64]u8 = undefined;
+    const follow_len = try master.makeFollowUp(2, origin, .{}, &follow_buffer);
+
+    _ = try slave.handleMessage(sync_buffer[0..sync_len], received);
+    _ = try slave.handleMessage(follow_buffer[0..follow_len], received);
+
+    const sync_event = slave.last_sync.?;
+    const follow_event = slave.last_follow_up.?;
+    const path_delay = clock.Duration.fromMilliseconds(1);
+    const estimate = ptp.clock.OrdinaryClock.estimateSync(
+        sync_event.timestamp,
+        follow_event.timestamp,
+        sync_event.receive_time,
+        sync_event.header.correction,
+        path_delay,
+    );
+    try std.testing.expectEqual(clock.Duration.fromNanoseconds(999 * std.time.ns_per_ms), estimate.offset);
+
+    var local_clock = FakeClock{
+        .utc = clock.Timestamp.fromSeconds(1_700_000_000),
+        .mono = .zero,
+    };
+    var disciplined = clock.DisciplinedClock.init(
+        clock.Monotonic.from(FakeClock, &local_clock),
+        local_clock.utc,
+        .{ .min_samples_for_step = 1 },
+    );
+    const result = disciplined.update(estimate.sample(local_clock.mono));
+    try std.testing.expect(result.stepped);
 }

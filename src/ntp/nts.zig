@@ -21,6 +21,10 @@ pub const vail = @import("nts/vail.zig");
 
 pub const Channel = ke.Channel;
 pub const Negotiation = ke.Negotiation;
+pub const ServerConfig = ke.ServerConfig;
+pub const ServerNegotiation = ke.ServerNegotiation;
+pub const negotiate = ke.negotiate;
+pub const negotiateServer = ke.negotiateServer;
 pub const KeyMaterial = keys.KeyMaterial;
 pub const CookieJar = cookie.Jar;
 pub const CookieCodec = cookie.Codec;

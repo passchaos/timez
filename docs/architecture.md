@@ -43,8 +43,11 @@ survivors with inverse-variance weights.
 ## NTS
 
 NTS-KE is abstracted behind `nts.ke.Channel`: application-data send/receive,
-close, and the RFC 8446 exporter. `nts.vail` implements that interface with
-vail's incremental TLS 1.3 client. The NTP packet layer uses:
+close, and the RFC 8446 exporter. `nts.ke.negotiate` implements the client
+record exchange and `nts.ke.negotiateServer` validates requests, derives keys,
+and mints encrypted cookies for the server response. `nts.vail` implements the
+client channel with vail's incremental TLS 1.3 state machine; the integration
+suite also drives a vail TLS 1.3 server channel through `negotiateServer`. The NTP packet layer uses:
 
 - Unique Identifier (0x0104), at least 32 random octets.
 - NTS Cookie (0x0204), opaque.

@@ -272,6 +272,170 @@ fn putU16(bytes: []u8, offset: usize, value: u16) void {
     bytes[offset + 1] = @truncate(value);
 }
 
+pub const ServerConfig = struct {
+    /// Cookie key ring used to mint opaque cookies for the client.
+    key_ring: *cookie.KeyRing,
+    /// Number of replacement cookies to send. RFC 8915 recommends eight.
+    cookies_per_response: usize = 8,
+    /// Optional NTP server name/port advertised to the client.
+    server_name: ?[]const u8 = null,
+    server_port: ?u16 = null,
+};
+
+pub const ServerNegotiation = struct {
+    keys: keys.KeyMaterial,
+    aead_id: u16,
+    cookie_count: usize,
+
+    pub fn deinit(self: *ServerNegotiation) void {
+        self.keys.deinit();
+    }
+};
+
+pub const ServerError = error{
+    BadRequest,
+    UnknownCriticalRecord,
+    NoSharedProtocol,
+    NoSharedAead,
+    ResponseTooLarge,
+    Closed,
+};
+
+/// Server side of an NTS-KE exchange. The caller supplies a TLS channel that
+/// has already completed its handshake and a cookie key ring. On success the
+/// response is sent and the derived keys are returned.
+pub fn negotiateServer(channel: Channel, config: ServerConfig) anyerror!ServerNegotiation {
+    errdefer channel.close();
+
+    var request_buffer: [max_response_len]u8 = undefined;
+    var request_len: usize = 0;
+    var message: records.Message = undefined;
+    while (true) {
+        if (request_len == request_buffer.len) return error.ResponseTooLarge;
+        const n = try channel.receive(request_buffer[request_len..]);
+        if (n == 0) return error.Closed;
+        request_len += n;
+        message = try records.parse(request_buffer[0..request_len]);
+        if (message.complete) break;
+    }
+
+    // RFC 8915: unknown critical records must produce error code 0.
+    for (message.records[0..message.count]) |record| {
+        if (record.critical and record.kind > records.record_ntp_port) {
+            try sendError(channel, 0);
+            return error.UnknownCriticalRecord;
+        }
+    }
+
+    var protocol_count: usize = 0;
+    var aead_count: usize = 0;
+    var protocol_seen = false;
+    var aead_seen = false;
+    var requested_name: ?[]const u8 = null;
+    var requested_port: ?u16 = null;
+
+    for (message.records[0..message.count]) |record| {
+        switch (record.kind) {
+            records.record_end => {},
+            records.record_next_protocol => {
+                protocol_count += 1;
+                if (protocol_count > 1 or record.body.len % 2 != 0) {
+                    try sendError(channel, 1);
+                    return error.BadRequest;
+                }
+                var i: usize = 0;
+                while (i < record.body.len) : (i += 2) {
+                    if (readU16(record.body, i) == records.protocol_ntpv4) protocol_seen = true;
+                }
+            },
+            records.record_aead => {
+                aead_count += 1;
+                if (aead_count > 1 or record.body.len != 2) {
+                    try sendError(channel, 1);
+                    return error.BadRequest;
+                }
+                if (readU16(record.body, 0) == records.aead_aes_siv_cmac_256) aead_seen = true;
+            },
+            records.record_ntp_server => {
+                if (requested_name != null) {
+                    try sendError(channel, 1);
+                    return error.BadRequest;
+                }
+                requested_name = record.body;
+            },
+            records.record_ntp_port => {
+                if (requested_port != null or record.body.len != 2) {
+                    try sendError(channel, 1);
+                    return error.BadRequest;
+                }
+                requested_port = readU16(record.body, 0);
+            },
+            records.record_error, records.record_warning, records.record_new_cookie => {
+                try sendError(channel, 1);
+                return error.BadRequest;
+            },
+            else => {
+                if (record.critical) {
+                    try sendError(channel, 0);
+                    return error.UnknownCriticalRecord;
+                }
+            },
+        }
+    }
+
+    if (protocol_count == 0 or !protocol_seen) {
+        try sendError(channel, 1);
+        return error.NoSharedProtocol;
+    }
+    if (aead_count == 0 or !aead_seen) {
+        try sendError(channel, 1);
+        return error.NoSharedAead;
+    }
+
+    const keys_value = try keys.derive(channel.exporter(), records.aead_aes_siv_cmac_256);
+
+    var response: [max_response_len]u8 = undefined;
+    var offset: usize = 0;
+    offset = try records.writeRecord(&response, offset, true, records.record_next_protocol, &.{ 0, 0 });
+    offset = try records.writeRecord(&response, offset, false, records.record_aead, &.{ 0, 15 });
+
+    if (config.server_name orelse requested_name) |name| {
+        offset = try records.writeRecord(&response, offset, false, records.record_ntp_server, name);
+    }
+    if (config.server_port orelse requested_port) |port| {
+        var body: [2]u8 = undefined;
+        putU16(&body, 0, port);
+        offset = try records.writeRecord(&response, offset, false, records.record_ntp_port, &body);
+    }
+
+    const cookie_count = @max(config.cookies_per_response, 1);
+    var cookie_buffer: [cookie.max_cookie_len]u8 = undefined;
+    var i: usize = 0;
+    while (i < cookie_count) : (i += 1) {
+        const value = try config.key_ring.encode(&cookie_buffer, keys_value);
+        offset = try records.writeRecord(&response, offset, false, records.record_new_cookie, value);
+    }
+    offset = try records.writeRecord(&response, offset, true, records.record_end, &.{});
+
+    try channel.send(response[0..offset]);
+    channel.close();
+
+    return .{
+        .keys = keys_value,
+        .aead_id = records.aead_aes_siv_cmac_256,
+        .cookie_count = cookie_count,
+    };
+}
+
+fn sendError(channel: Channel, code: u16) !void {
+    var buffer: [16]u8 = undefined;
+    var body: [2]u8 = undefined;
+    putU16(&body, 0, code);
+    var offset = try records.writeRecord(&buffer, 0, true, records.record_error, &body);
+    offset = try records.writeRecord(&buffer, offset, true, records.record_end, &.{});
+    try channel.send(buffer[0..offset]);
+}
+
 test "negotiation accepts a complete response" {
     const Mock = struct {
         response: []const u8,
@@ -408,4 +572,112 @@ test "negotiation rejects server errors and unknown critical records" {
     offset = try records.writeRecord(&second, offset, true, records.record_end, &.{});
     var unknown = Mock{ .response = second[0..offset] };
     try std.testing.expectError(error.UnknownCriticalRecord, negotiate(unknown.channel(), .{}));
+}
+
+const ServerMock = struct {
+    request: []const u8,
+    request_offset: usize = 0,
+    response: [1024]u8 = undefined,
+    response_len: usize = 0,
+    exporter_calls: usize = 0,
+    closed: bool = false,
+
+    fn vtSend(ctx: *anyopaque, bytes: []const u8) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.response_len + bytes.len > self.response.len) return error.BufferTooSmall;
+        @memcpy(self.response[self.response_len .. self.response_len + bytes.len], bytes);
+        self.response_len += bytes.len;
+    }
+
+    fn vtReceive(ctx: *anyopaque, buffer: []u8) anyerror!usize {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        const remaining = self.request.len - self.request_offset;
+        const n = @min(buffer.len, remaining);
+        @memcpy(buffer[0..n], self.request[self.request_offset .. self.request_offset + n]);
+        self.request_offset += n;
+        return n;
+    }
+
+    fn vtExport(ctx: *anyopaque, label: []const u8, context: []const u8, output: []u8) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        try std.testing.expectEqualStrings(keys.exporter_label, label);
+        try std.testing.expectEqual(@as(usize, 5), context.len);
+        self.exporter_calls += 1;
+        @memset(output, @truncate(self.exporter_calls));
+    }
+
+    fn vtClose(ctx: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.closed = true;
+    }
+
+    fn channel(self: *@This()) Channel {
+        return .{
+            .ctx = self,
+            .vtable = &.{
+                .send = vtSend,
+                .receive = vtReceive,
+                .export_keying_material = vtExport,
+                .close = vtClose,
+            },
+        };
+    }
+};
+
+test "server negotiation mints cookies and derives keys" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const codec = cookie.Codec.init(io, 7, [_]u8{0x33} ** 32);
+    var key_ring = cookie.KeyRing{ .current = codec };
+
+    var request_buffer: [128]u8 = undefined;
+    var offset: usize = 0;
+    offset = try records.writeRecord(&request_buffer, offset, true, records.record_next_protocol, &.{ 0, 0 });
+    offset = try records.writeRecord(&request_buffer, offset, true, records.record_aead, &.{ 0, 15 });
+    offset = try records.writeRecord(&request_buffer, offset, false, records.record_ntp_server, "ntp.example.com");
+    offset = try records.writeRecord(&request_buffer, offset, true, records.record_end, &.{});
+
+    var mock = ServerMock{ .request = request_buffer[0..offset] };
+    var negotiation = try negotiateServer(mock.channel(), .{
+        .key_ring = &key_ring,
+        .cookies_per_response = 2,
+    });
+    defer negotiation.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), negotiation.cookie_count);
+    try std.testing.expectEqual(@as(usize, 2), mock.exporter_calls);
+    try std.testing.expect(mock.closed);
+
+    const response = try records.parseComplete(mock.response[0..mock.response_len]);
+    try std.testing.expectEqual(@as(usize, 2), response.countKind(records.record_new_cookie));
+    try std.testing.expectEqualSlices(u8, "ntp.example.com", response.find(records.record_ntp_server).?.body);
+
+    const cookie_body = response.find(records.record_new_cookie).?.body;
+    const recovered = try codec.decode(cookie_body);
+    try std.testing.expect(negotiation.keys.eql(recovered));
+}
+
+test "server negotiation rejects a request without AEAD" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const codec = cookie.Codec.init(io, 7, [_]u8{0x33} ** 32);
+    var key_ring = cookie.KeyRing{ .current = codec };
+
+    var request_buffer: [64]u8 = undefined;
+    var offset: usize = 0;
+    offset = try records.writeRecord(&request_buffer, offset, true, records.record_next_protocol, &.{ 0, 0 });
+    offset = try records.writeRecord(&request_buffer, offset, true, records.record_end, &.{});
+
+    var mock = ServerMock{ .request = request_buffer[0..offset] };
+    try std.testing.expectError(
+        error.NoSharedAead,
+        negotiateServer(mock.channel(), .{ .key_ring = &key_ring }),
+    );
+
+    const response = try records.parseComplete(mock.response[0..mock.response_len]);
+    try std.testing.expectEqual(@as(usize, 1), response.countKind(records.record_error));
+    try std.testing.expectEqual(@as(u16, 1), readU16(response.find(records.record_error).?.body, 0));
 }

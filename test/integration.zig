@@ -439,6 +439,118 @@ fn writeServerFlight(writer: *std.Io.Writer, flight: []const u8) !void {
     try writer.flush();
 }
 
+const ServerAppChannel = struct {
+    established: *ServerConnEstablished,
+    reader: *std.Io.net.Stream.Reader,
+    writer: *std.Io.net.Stream.Writer,
+    pending: [4096]u8 = undefined,
+    pending_len: usize = 0,
+
+    fn sendBytes(self: *ServerAppChannel, bytes: []const u8) !void {
+        var record: [8192]u8 = undefined;
+        const len = try self.established.application.sealApplicationData(bytes, &record);
+        try self.writer.interface.writeAll(record[0..len]);
+        try self.writer.interface.flush();
+    }
+
+    fn receiveBytes(self: *ServerAppChannel, buffer: []u8) !usize {
+        while (true) {
+            var input: [4096]u8 = undefined;
+            var input_len = self.pending_len;
+            if (input_len > 0) {
+                @memcpy(input[0..input_len], self.pending[0..input_len]);
+                self.pending_len = 0;
+            } else {
+                input_len = try readAvailableIntegration(&self.reader.interface, &input);
+                if (input_len == 0) return error.ConnectionClosed;
+            }
+
+            var offset: usize = 0;
+            while (offset < input_len) {
+                const result = try self.established.application.receive(input[offset..input_len]);
+                offset += result.consumed;
+                if (result.event) |event| switch (event) {
+                    .application_data => |data| {
+                        if (data.len > buffer.len) return error.BufferTooSmall;
+                        @memcpy(buffer[0..data.len], data);
+                        if (offset < input_len) {
+                            const remaining = input_len - offset;
+                            @memcpy(self.pending[0..remaining], input[offset..input_len]);
+                            self.pending_len = remaining;
+                        }
+                        return data.len;
+                    },
+                    .key_update => {
+                        var response: [4096]u8 = undefined;
+                        const len = self.established.application.sealKeyUpdateResponse(&response) catch |err| switch (err) {
+                            error.NoKeyUpdateResponsePending => 0,
+                            else => return err,
+                        };
+                        if (len > 0) {
+                            try self.writer.interface.writeAll(response[0..len]);
+                            try self.writer.interface.flush();
+                        }
+                    },
+                    .post_handshake => {},
+                    .alert => return error.TlsAlert,
+                };
+                if (result.consumed == 0 and result.event == null) break;
+            }
+
+            if (offset < input_len) {
+                const remaining = input_len - offset;
+                @memcpy(self.pending[0..remaining], input[offset..input_len]);
+                self.pending_len = remaining;
+            }
+        }
+    }
+
+    fn exportKeyingMaterial(self: *ServerAppChannel, label: []const u8, context: []const u8, output: []u8) !void {
+        return self.established.exportKeyingMaterial(label, context, output);
+    }
+
+    fn close(self: *ServerAppChannel) void {
+        var alert: [64]u8 = undefined;
+        const len = self.established.application.sealCloseNotify(&alert) catch 0;
+        if (len > 0) {
+            self.writer.interface.writeAll(alert[0..len]) catch {};
+            self.writer.interface.flush() catch {};
+        }
+    }
+
+    fn channel(self: *ServerAppChannel) ntp.nts.ke.Channel {
+        const Adapter = struct {
+            fn send(ctx: *anyopaque, bytes: []const u8) anyerror!void {
+                const ptr: *ServerAppChannel = @ptrCast(@alignCast(ctx));
+                return ptr.sendBytes(bytes);
+            }
+            fn receive(ctx: *anyopaque, buffer: []u8) anyerror!usize {
+                const ptr: *ServerAppChannel = @ptrCast(@alignCast(ctx));
+                return ptr.receiveBytes(buffer);
+            }
+            fn exportKeyingMaterial(ctx: *anyopaque, label: []const u8, context: []const u8, output: []u8) anyerror!void {
+                const ptr: *ServerAppChannel = @ptrCast(@alignCast(ctx));
+                return ptr.exportKeyingMaterial(label, context, output);
+            }
+            fn close(ctx: *anyopaque) void {
+                const ptr: *ServerAppChannel = @ptrCast(@alignCast(ctx));
+                ptr.close();
+            }
+        };
+        return .{
+            .ctx = self,
+            .vtable = &.{
+                .send = Adapter.send,
+                .receive = Adapter.receive,
+                .export_keying_material = Adapter.exportKeyingMaterial,
+                .close = Adapter.close,
+            },
+        };
+    }
+};
+
+const ServerConnEstablished = vail.tls.server_connection.ServerConnection(4096, 4096).Established;
+
 const NtsKeTestServer = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -530,42 +642,21 @@ const NtsKeTestServer = struct {
             }
         }
 
-        var response: [256]u8 = undefined;
-        var offset: usize = 0;
-        offset = try ntp.nts.records.writeRecord(&response, offset, true, ntp.nts.records.record_next_protocol, &.{ 0, 0 });
-        offset = try ntp.nts.records.writeRecord(&response, offset, false, ntp.nts.records.record_aead, &.{ 0, 15 });
-        offset = try ntp.nts.records.writeRecord(&response, offset, false, ntp.nts.records.record_new_cookie, &([_]u8{0x77} ** 16));
-        offset = try ntp.nts.records.writeRecord(&response, offset, true, ntp.nts.records.record_end, &.{});
+        var cookie_key: [32]u8 = undefined;
+        ctx.io.random(&cookie_key);
+        const cookie_codec = ntp.nts.CookieCodec.init(ctx.io, 1, cookie_key);
+        var key_ring = ntp.nts.CookieKeyRing{ .current = cookie_codec };
 
-        var application_input: [4096]u8 = undefined;
-        while (true) {
-            const n = try readAvailableIntegration(&reader.interface, &application_input);
-            if (n == 0) return error.ConnectionClosed;
-            var app_offset: usize = 0;
-            while (app_offset < n) {
-                const received = try established.application.receive(application_input[app_offset..n]);
-                app_offset += received.consumed;
-                if (received.event) |event| switch (event) {
-                    .application_data => {
-                        var record: [4096]u8 = undefined;
-                        const len = try established.application.sealApplicationData(response[0..offset], &record);
-                        try writer.interface.writeAll(record[0..len]);
-                        try writer.interface.flush();
-
-                        var alert: [64]u8 = undefined;
-                        const alert_len = established.application.sealCloseNotify(&alert) catch 0;
-                        if (alert_len > 0) {
-                            try writer.interface.writeAll(alert[0..alert_len]);
-                            try writer.interface.flush();
-                        }
-                        return;
-                    },
-                    .alert => return error.TlsAlert,
-                    else => {},
-                };
-                if (received.consumed == 0 and received.event == null) break;
-            }
-        }
+        var app_channel = ServerAppChannel{
+            .established = &established,
+            .reader = &reader,
+            .writer = &writer,
+        };
+        var negotiation = try ntp.nts.ke.negotiateServer(app_channel.channel(), .{
+            .key_ring = &key_ring,
+            .cookies_per_response = 2,
+        });
+        defer negotiation.deinit();
     }
 };
 
@@ -602,7 +693,7 @@ test "NTS-KE completes over a vail TLS 1.3 channel" {
 
     var negotiation = try ntp.nts.ke.negotiate(channel.channel(), .{});
     defer negotiation.deinit();
-    try std.testing.expectEqual(@as(usize, 1), negotiation.cookies.len());
+    try std.testing.expectEqual(@as(usize, 2), negotiation.cookies.len());
     try std.testing.expectEqual(@as(u16, 15), negotiation.aead_id);
 
     server_thread.join();

@@ -191,3 +191,18 @@ test "negative pending leap" {
     try std.testing.expectEqual(@as(i96, 36), leap.taiMinusUtc(effective).toSeconds());
     try std.testing.expectEqual(LeapIndicator.last_minute_59, leap.leapIndicator(effective.sub(Duration.fromHours(1))));
 }
+
+test "pending leap utc tai round-trip" {
+    const effective = Timestamp.fromSeconds(1_700_000_000);
+    const leap = LeapSeconds{ .pending = .{ .effective = effective, .delta = 1 } };
+    const instants = [_]Timestamp{
+        effective.sub(Duration.fromSeconds(1)),
+        effective,
+        effective.add(Duration.fromSeconds(1)),
+    };
+    for (instants) |utc| {
+        const tai = leap.utcToTai(utc);
+        const back = leap.taiToUtc(tai);
+        try std.testing.expectEqual(utc.ns, back.ns);
+    }
+}

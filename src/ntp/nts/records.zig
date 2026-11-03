@@ -182,3 +182,19 @@ test "malformed end record is rejected" {
     _ = try writeRecord(&buffer, 0, false, record_end, &.{});
     try std.testing.expectError(error.InvalidEndRecord, parseComplete(&buffer));
 }
+
+test "fuzz NTS-KE record parser" {
+    try std.testing.fuzz({}, fuzzRecords, .{});
+}
+
+fn fuzzRecords(_: void, smith: *std.testing.Smith) !void {
+    var buffer: [1024]u8 = undefined;
+    const len = smith.slice(&buffer);
+    const message = parse(buffer[0..len]) catch return;
+    var total: usize = 0;
+    for (message.records[0..message.count]) |record| {
+        total += 4 + record.body.len;
+    }
+    if (message.complete) try std.testing.expectEqual(len, total);
+    try std.testing.expect(total <= len);
+}

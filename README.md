@@ -13,7 +13,7 @@ Implemented and tested:
 | --- | --- |
 | `timez.clock` | `TimeSource`/`Monotonic`, UTC/TAI, leap seconds, clock quality, jump detection, `SystemClock`, offset filtering, frequency estimation, step/slew discipline, holdover, discontinuity reporting |
 | `timez.ntp` | Bounded NTPv4/SNTP packet parser/serializer, timestamp era conversion, client, server, kiss-o'-death handling, RFC 5905 clock filter and Marzullo selection, reachability, adaptive polling, UDP and in-memory transports |
-| `timez.ntp.nts` | RFC 8915 NTS-KE record codec, RFC 8446 exporter key derivation, AES-SIV-CMAC-256 authenticator, cookie codec and jar, client/server sessions, and a `vail` TLS 1.3 NTS-KE adapter |
+| `timez.ntp.nts` | RFC 8915 NTS-KE record codec, client and server negotiation, RFC 8446 exporter key derivation, AES-SIV-CMAC-256 authenticator, cookie codec and jar, client/server NTP sessions, and a `vail` TLS 1.3 NTS-KE adapter |
 | `timez.hal.linux` | `SO_TIMESTAMPING` configuration and `SCM_TIMESTAMPING` parsing, `/dev/ptp*` caps and sys-offset ioctls, `AF_PACKET` raw Ethernet PTP transport |
 | `timez.ptp` | IEEE 1588 types, bounded PTPv2 message parser/serializer, BMCA, ordinary/boundary/transparent clock logic, sync/path-delay estimation |
 | `timez.profiles` | IEEE 1588 default, 802.1AS/gPTP, AES67/ST 2059-2, G.8275.1, C37.238 |

@@ -48,6 +48,7 @@ pub const VailChannel = struct {
     tls_output: std.ArrayList(u8) = .empty,
     established: TlsClient.Established = undefined,
     established_ready: bool = false,
+    tls_initialized: bool = false,
     pending: [4096]u8 = undefined,
     pending_len: usize = 0,
     closed: bool = false,
@@ -66,7 +67,12 @@ pub const VailChannel = struct {
             .mode = .stream,
             .timeout = config.connect_timeout,
         });
-        errdefer self.stream.close(config.io);
+        errdefer {
+            if (self.established_ready) self.established.deinit();
+            if (self.tls_initialized) self.tls.deinit();
+            self.tls_output.deinit(self.allocator);
+            self.stream.close(self.io);
+        }
 
         self.reader = self.stream.reader(config.io, &self.reader_buffer);
         self.writer = self.stream.writer(config.io, &self.writer_buffer);
@@ -91,6 +97,7 @@ pub const VailChannel = struct {
             .server_certificate_type = config.server_certificate_type,
             .request_ocsp = false,
         }, &self.tls_output);
+        self.tls_initialized = true;
 
         try self.sendRaw(self.tls_output.items);
         self.tls_output.clearRetainingCapacity();

@@ -13,7 +13,8 @@ integration suite includes:
 - A real UDP loopback NTP request/response exchange.
 - NTP client -> clock filter/selection -> discipline composition.
 - NTS client/server protection and NTS NAK handling.
-- A real `vail` TLS 1.3 NTS-KE exchange using an Ed25519 raw public key.
+- A real `vail` TLS 1.3 NTS-KE exchange using an Ed25519 raw public key,
+  including the server negotiation path and encrypted cookie minting.
 - Linux `SO_TIMESTAMPING` receive timestamps on loopback.
 - PTP announce/sync/follow-up feeding the discipline loop.
 

@@ -36,9 +36,11 @@ pub const Config = struct {
     priority2: u8 = 128,
     quality: ClockQuality = .{},
     time_source: TimeSource = .other,
+    /// UTC offset advertised in Announce messages (e.g. 37 s).
+    utc_offset: i16 = 37,
     two_step: bool = true,
     log_message_interval: i8 = -3,
-    control_field: u8 = 0,
+    control_field: ?u8 = null,
 };
 
 pub const SyncEvent = struct {
@@ -70,6 +72,24 @@ pub const AnnounceEvent = struct {
     receive_time: Timestamp,
 };
 
+pub const PdelayReqEvent = struct {
+    header: Header,
+    timestamp: Timestamp,
+    receive_time: Timestamp,
+};
+
+pub const PdelayRespEvent = struct {
+    header: Header,
+    body: message.PdelayRespBody,
+    receive_time: Timestamp,
+};
+
+pub const PdelayRespFollowUpEvent = struct {
+    header: Header,
+    body: message.PdelayRespFollowUpBody,
+    receive_time: Timestamp,
+};
+
 pub const SignalingEvent = struct {
     header: Header,
     body: message.SignalingBody,
@@ -80,6 +100,9 @@ pub const Event = union(enum) {
     follow_up: FollowUpEvent,
     delay_req: DelayReqEvent,
     delay_resp: DelayRespEvent,
+    pdelay_req: PdelayReqEvent,
+    pdelay_resp: PdelayRespEvent,
+    pdelay_resp_follow_up: PdelayRespFollowUpEvent,
     announce: AnnounceEvent,
     signaling: SignalingEvent,
     ignored: void,
@@ -183,6 +206,30 @@ pub const OrdinaryClock = struct {
                     .receive_time = receive_time,
                 } };
             },
+            .pdelay_req => {
+                const body = try message.parsePdelayReq(parsed.body);
+                return .{ .pdelay_req = .{
+                    .header = parsed.header,
+                    .timestamp = body.origin_timestamp,
+                    .receive_time = receive_time,
+                } };
+            },
+            .pdelay_resp => {
+                const body = try message.parsePdelayResp(parsed.body);
+                return .{ .pdelay_resp = .{
+                    .header = parsed.header,
+                    .body = body,
+                    .receive_time = receive_time,
+                } };
+            },
+            .pdelay_resp_follow_up => {
+                const body = try message.parsePdelayRespFollowUp(parsed.body);
+                return .{ .pdelay_resp_follow_up = .{
+                    .header = parsed.header,
+                    .body = body,
+                    .receive_time = receive_time,
+                } };
+            },
             .announce => {
                 const body = try message.parseAnnounce(parsed.body);
                 _ = self.bmca.update(&.{Dataset.fromAnnounce(body)});
@@ -252,6 +299,44 @@ pub const OrdinaryClock = struct {
         return self.writeHeaderBody(.delay_resp, sequence_id, correction, body[0..body_len], output);
     }
 
+    pub fn makePdelayReq(
+        self: *const OrdinaryClock,
+        sequence_id: u16,
+        origin: Timestamp,
+        correction: CorrectionField,
+        output: []u8,
+    ) Error!usize {
+        var body: [16]u8 = undefined;
+        const body_len = try message.writePdelayReq(&body, origin);
+        return self.writeHeaderBody(.pdelay_req, sequence_id, correction, body[0..body_len], output);
+    }
+
+    pub fn makePdelayResp(
+        self: *const OrdinaryClock,
+        sequence_id: u16,
+        request_receipt: Timestamp,
+        requesting: PortIdentity,
+        correction: CorrectionField,
+        output: []u8,
+    ) Error!usize {
+        var body: [32]u8 = undefined;
+        const body_len = try message.writePdelayResp(&body, request_receipt, requesting);
+        return self.writeHeaderBody(.pdelay_resp, sequence_id, correction, body[0..body_len], output);
+    }
+
+    pub fn makePdelayRespFollowUp(
+        self: *const OrdinaryClock,
+        sequence_id: u16,
+        response_origin: Timestamp,
+        requesting: PortIdentity,
+        correction: CorrectionField,
+        output: []u8,
+    ) Error!usize {
+        var body: [32]u8 = undefined;
+        const body_len = try message.writePdelayRespFollowUp(&body, response_origin, requesting);
+        return self.writeHeaderBody(.pdelay_resp_follow_up, sequence_id, correction, body[0..body_len], output);
+    }
+
     pub fn makeAnnounce(
         self: *const OrdinaryClock,
         sequence_id: u16,
@@ -262,7 +347,7 @@ pub const OrdinaryClock = struct {
         var body: [32]u8 = undefined;
         const body_len = try message.writeAnnounce(&body, .{
             .origin_timestamp = origin,
-            .current_utc_offset = 37,
+            .current_utc_offset = self.config.utc_offset,
             .grandmaster_priority1 = self.config.priority1,
             .grandmaster_quality = self.config.quality,
             .grandmaster_priority2 = self.config.priority2,
@@ -288,7 +373,7 @@ pub const OrdinaryClock = struct {
             .correction = correction,
             .source_port_identity = self.portIdentity(),
             .sequence_id = sequence_id,
-            .control_field = self.config.control_field,
+            .control_field = self.config.control_field orelse message_type.controlField(),
             .log_message_interval = self.config.log_message_interval,
             .flags = .{ .two_step = self.config.two_step },
         };
@@ -317,6 +402,18 @@ pub const OrdinaryClock = struct {
             .t1 = t1,
             .t2 = t2,
         };
+    }
+
+    /// Peer delay is computed from the same four timestamps as end-to-end
+    /// path delay, using the Pdelay_Req/Pdelay_Resp exchange.
+    pub fn estimatePeerDelay(
+        t1: Timestamp,
+        t2: Timestamp,
+        t3: Timestamp,
+        t4: Timestamp,
+        correction: CorrectionField,
+    ) Duration {
+        return estimatePathDelay(t1, t2, t3, t4, correction);
     }
 
     /// Compute the path delay from a Delay_Req/Delay_Resp exchange.
@@ -422,6 +519,36 @@ test "transparent clock adds residence time" {
     const egress: Timestamp = .{ .seconds = 10, .nanoseconds = 1000 };
     const corrected = TransparentClock.addResidence(.{}, ingress, egress);
     try std.testing.expectEqual(Duration.fromMicroseconds(1), corrected.toDuration());
+}
+
+test "pdelay messages round-trip" {
+    const config: Config = .{
+        .identity = ClockIdentity.fromU64(0x0011223344556677),
+        .domain = 0,
+        .two_step = true,
+    };
+    var ordinary = OrdinaryClock.init(config);
+    const origin: Timestamp = .{ .seconds = 1_700_000_000, .nanoseconds = 0 };
+    const requesting: PortIdentity = .{
+        .clock_identity = ClockIdentity.fromU64(0x0102030405060708),
+        .port_number = 1,
+    };
+
+    var request: [64]u8 = undefined;
+    const request_len = try ordinary.makePdelayReq(1, origin, .{}, &request);
+    const event = try ordinary.handleMessage(request[0..request_len], origin);
+    switch (event) {
+        .pdelay_req => |req| try std.testing.expectEqual(@as(u48, 1_700_000_000), req.timestamp.seconds),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var response: [64]u8 = undefined;
+    const response_len = try ordinary.makePdelayResp(1, origin, requesting, .{}, &response);
+    const parsed = try ordinary.handleMessage(response[0..response_len], origin);
+    switch (parsed) {
+        .pdelay_resp => |resp| try std.testing.expect(PortIdentity.eql(requesting, resp.body.requesting_port_identity)),
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "boundary clock bounds its ports" {

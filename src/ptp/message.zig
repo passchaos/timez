@@ -186,6 +186,47 @@ pub fn parseAnnounce(body: []const u8) ParseError!AnnounceBody {
     };
 }
 
+pub const PdelayReqBody = struct {
+    origin_timestamp: types.Timestamp,
+};
+
+pub fn parsePdelayReq(body: []const u8) ParseError!PdelayReqBody {
+    if (body.len < 10) return error.BodyTooShort;
+    return .{ .origin_timestamp = readTimestamp(body, 0) };
+}
+
+pub const PdelayRespBody = struct {
+    request_receipt_timestamp: types.Timestamp,
+    requesting_port_identity: types.PortIdentity,
+};
+
+pub fn parsePdelayResp(body: []const u8) ParseError!PdelayRespBody {
+    if (body.len < 20) return error.BodyTooShort;
+    return .{
+        .request_receipt_timestamp = readTimestamp(body, 0),
+        .requesting_port_identity = .{
+            .clock_identity = .{ .bytes = body[10..18].* },
+            .port_number = readU16(body, 18),
+        },
+    };
+}
+
+pub const PdelayRespFollowUpBody = struct {
+    response_origin_timestamp: types.Timestamp,
+    requesting_port_identity: types.PortIdentity,
+};
+
+pub fn parsePdelayRespFollowUp(body: []const u8) ParseError!PdelayRespFollowUpBody {
+    if (body.len < 20) return error.BodyTooShort;
+    return .{
+        .response_origin_timestamp = readTimestamp(body, 0),
+        .requesting_port_identity = .{
+            .clock_identity = .{ .bytes = body[10..18].* },
+            .port_number = readU16(body, 18),
+        },
+    };
+}
+
 pub const SignalingBody = struct {
     target_port_identity: types.PortIdentity,
 };
@@ -218,6 +259,36 @@ pub fn writeDelayReq(body: []u8, timestamp: types.Timestamp) ParseError!usize {
 }
 
 pub fn writeDelayResp(
+    body: []u8,
+    timestamp: types.Timestamp,
+    requesting: types.PortIdentity,
+) ParseError!usize {
+    if (body.len < 20) return error.BufferTooSmall;
+    writeTimestamp(body, 0, timestamp);
+    @memcpy(body[10..18], &requesting.clock_identity.bytes);
+    putU16(body, 18, requesting.port_number);
+    return 20;
+}
+
+pub fn writePdelayReq(body: []u8, timestamp: types.Timestamp) ParseError!usize {
+    if (body.len < 10) return error.BufferTooSmall;
+    writeTimestamp(body, 0, timestamp);
+    return 10;
+}
+
+pub fn writePdelayResp(
+    body: []u8,
+    timestamp: types.Timestamp,
+    requesting: types.PortIdentity,
+) ParseError!usize {
+    if (body.len < 20) return error.BufferTooSmall;
+    writeTimestamp(body, 0, timestamp);
+    @memcpy(body[10..18], &requesting.clock_identity.bytes);
+    putU16(body, 18, requesting.port_number);
+    return 20;
+}
+
+pub fn writePdelayRespFollowUp(
     body: []u8,
     timestamp: types.Timestamp,
     requesting: types.PortIdentity,
@@ -362,6 +433,19 @@ test "announce body round-trip" {
     try std.testing.expectEqual(@as(u16, 2), parsed.steps_removed);
     try std.testing.expectEqual(types.TimeSource.gps, parsed.time_source);
     try std.testing.expect(types.ClockIdentity.eql(announce.grandmaster_identity, parsed.grandmaster_identity));
+}
+
+test "message type wire values match IEEE 1588" {
+    try std.testing.expectEqual(@as(u4, 0x0), @intFromEnum(types.MessageType.sync));
+    try std.testing.expectEqual(@as(u4, 0x1), @intFromEnum(types.MessageType.delay_req));
+    try std.testing.expectEqual(@as(u4, 0x2), @intFromEnum(types.MessageType.pdelay_req));
+    try std.testing.expectEqual(@as(u4, 0x3), @intFromEnum(types.MessageType.pdelay_resp));
+    try std.testing.expectEqual(@as(u4, 0x8), @intFromEnum(types.MessageType.follow_up));
+    try std.testing.expectEqual(@as(u4, 0x9), @intFromEnum(types.MessageType.delay_resp));
+    try std.testing.expectEqual(@as(u4, 0xa), @intFromEnum(types.MessageType.pdelay_resp_follow_up));
+    try std.testing.expectEqual(@as(u4, 0xb), @intFromEnum(types.MessageType.announce));
+    try std.testing.expectEqual(@as(u4, 0xc), @intFromEnum(types.MessageType.signaling));
+    try std.testing.expectEqual(@as(u4, 0xd), @intFromEnum(types.MessageType.management));
 }
 
 test "invalid lengths and versions are rejected" {

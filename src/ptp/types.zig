@@ -6,17 +6,35 @@ const clock = @import("../clock/mod.zig");
 pub const Duration = clock.Duration;
 
 pub const MessageType = enum(u4) {
-    sync = 0,
-    delay_req = 1,
-    follow_up = 2,
-    delay_resp = 3,
-    management = 4,
-    signaling = 5,
-    announce = 11,
+    sync = 0x0,
+    delay_req = 0x1,
+    pdelay_req = 0x2,
+    pdelay_resp = 0x3,
+    follow_up = 0x8,
+    delay_resp = 0x9,
+    pdelay_resp_follow_up = 0xa,
+    announce = 0xb,
+    signaling = 0xc,
+    management = 0xd,
     _,
 
     pub fn isSyncLike(self: MessageType) bool {
         return self == .sync or self == .follow_up;
+    }
+
+    /// Deprecated control-field value for this message type (IEEE 1588
+    /// Table 26). Receivers ignore it, but emitters should match the table.
+    pub fn controlField(self: MessageType) u8 {
+        return switch (self) {
+            .sync => 0,
+            .delay_req => 1,
+            .follow_up => 2,
+            .delay_resp => 3,
+            .management => 4,
+            .signaling => 5,
+            .announce => 6,
+            else => 0,
+        };
     }
 };
 

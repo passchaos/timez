@@ -62,7 +62,8 @@ the negotiated AEAD identifier and both direction keys.
 ## PTP
 
 PTP messages are parsed with strict length checks. The ordinary clock builds
-and consumes Sync/Follow_Up/Delay_Req/Delay_Resp/Announce messages. The BMCA
+and consumes Sync/Follow_Up/Delay_Req/Delay_Resp/Pdelay_Req/Pdelay_Resp/
+Pdelay_Resp_Follow_Up/Announce messages. The BMCA
 orders datasets by priority1, clockClass, clockAccuracy,
 offsetScaledLogVariance, priority2, clockIdentity, and stepsRemoved.
 Transparent clocks add ingress-to-egress residence time to the correction

@@ -57,6 +57,7 @@ pub const QueryError = packet_mod.ParseError || transport_mod.SendError ||
     UnexpectedSource,
     KissOfDeath,
     InvalidDelay,
+    InvalidStratum,
 } || nts_mod.session.Error;
 
 pub const Measurement = struct {
@@ -206,6 +207,7 @@ pub const Client = struct {
         }
         if (parsed.packet.transmit_timestamp.isZero()) return error.ZeroTransmitTimestamp;
         if (parsed.packet.receive_timestamp.isZero()) return error.ZeroReceiveTimestamp;
+        if (parsed.packet.stratum > 15) return error.InvalidStratum;
 
         if (self.config.verify_source) {
             if (!received.from.eql(&peer)) return error.UnexpectedSource;
